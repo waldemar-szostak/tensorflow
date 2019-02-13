@@ -19,7 +19,6 @@ limitations under the License.
 #include <ctime>
 #include <vector>
 
-#include "tensorflow/contrib/tpu/profiler/op_profile.pb.h"
 #include "tensorflow/contrib/tpu/profiler/trace_events.pb.h"
 #include "tensorflow/contrib/tpu/profiler/trace_events_to_json.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -29,6 +28,7 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/profiler/op_profile.pb.h"
 #include "tensorflow/core/util/events_writer.h"
 
 namespace tensorflow {
@@ -88,7 +88,7 @@ Status DumpTraceToLogDirectory(StringPiece run_dir, const string& host_prefix,
 
 Status DumpOpProfileToLogDirectory(StringPiece run_dir,
                                    const string& host_prefix,
-                                   const tpu::op_profile::Profile& profile,
+                                   const profiler::op_profile::Profile& profile,
                                    std::ostream* os) {
   string path = JoinPath(run_dir, StrCat(host_prefix, kJsonOpProfileFileName));
   string json;
@@ -142,9 +142,8 @@ Status WriteTensorboardTPUProfile(const string& logdir, const string& run,
     TF_RETURN_IF_ERROR(DumpTraceToLogDirectory(profile_run_dir, host_prefix,
                                                response.encoded_trace(), os));
   }
-  if (response.has_op_profile() &&
-      (response.op_profile().has_by_program_structure() ||
-       response.op_profile().has_by_category())) {
+  if (response.has_op_profile() && (response.op_profile().has_by_program() ||
+                                    response.op_profile().has_by_category())) {
     TF_RETURN_IF_ERROR(DumpOpProfileToLogDirectory(profile_run_dir, host_prefix,
                                                    response.op_profile(), os));
   }

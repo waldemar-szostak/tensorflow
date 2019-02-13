@@ -113,8 +113,7 @@ class BoostedTreesTrainingPredictOp : public OpKernel {
       output_tree_ids.setConstant(latest_tree);
       auto do_work = [&resource, &batch_bucketized_features, &cached_tree_ids,
                       &cached_node_ids, &output_partial_logits,
-                      &output_node_ids, batch_size,
-                      latest_tree](int32 start, int32 end) {
+                      &output_node_ids, latest_tree](int32 start, int32 end) {
         for (int32 i = start; i < end; ++i) {
           int32 tree_id = cached_tree_ids(i);
           int32 node_id = cached_node_ids(i);
@@ -227,7 +226,7 @@ class BoostedTreesPredictOp : public OpKernel {
     const int32 last_tree = resource->num_trees() - 1;
 
     auto do_work = [&resource, &batch_bucketized_features, &output_logits,
-                    batch_size, last_tree](int32 start, int32 end) {
+                    last_tree](int32 start, int32 end) {
       for (int32 i = start; i < end; ++i) {
         float tree_logit = 0.0;
         int32 tree_id = 0;
@@ -329,35 +328,39 @@ class BoostedTreesExampleDebugOutputsOp : public OpKernel {
     // path. Note: feature_ids has one less value than logits_path because the
     // first value of each logit path will be the bias.
     auto do_work = [&resource, &batch_bucketized_features, &output_debug_info,
-                    batch_size, last_tree](int32 start, int32 end) {
+                    last_tree](int32 start, int32 end) {
       for (int32 i = start; i < end; ++i) {
         // Proto to store debug outputs, per example.
         boosted_trees::DebugOutput example_debug_info;
         // Initial bias prediction. E.g., prediction based off training mean.
-        example_debug_info.add_logits_path(resource->GetTreeWeight(0) *
-                                           resource->node_value(0, 0));
+        float tree_logit =
+            resource->GetTreeWeight(0) * resource->node_value(0, 0);
+        example_debug_info.add_logits_path(tree_logit);
         int32 node_id = 0;
         int32 tree_id = 0;
         int32 feature_id;
-        float tree_logit;
         float past_trees_logit = 0;  // Sum of leaf logits from prior trees.
-        // Populate proto.
+        // Go through each tree and populate proto.
         while (tree_id <= last_tree) {
-          // Feature id used to split.
-          feature_id = resource->feature_id(tree_id, node_id);
-          example_debug_info.add_feature_ids(feature_id);
-          // Get logit after split.
-          node_id = resource->next_node(tree_id, node_id, i,
-                                        batch_bucketized_features);
-          tree_logit = resource->GetTreeWeight(tree_id) *
-                       resource->node_value(tree_id, node_id);
-          // Output logit incorporates sum of leaf logits from prior trees.
-          example_debug_info.add_logits_path(tree_logit + past_trees_logit);
-          if (resource->is_leaf(tree_id, node_id)) {
-            // Move onto other trees.
-            past_trees_logit += tree_logit;
+          if (resource->is_leaf(tree_id, node_id)) {  // Move onto other trees.
+            // Accumulate tree_logits only if the leaf is non-root, but do so
+            // for bias tree.
+            if (tree_id == 0 || node_id > 0) {
+              past_trees_logit += tree_logit;
+            }
             ++tree_id;
             node_id = 0;
+          } else {  // Add to proto.
+            // Feature id used to split.
+            feature_id = resource->feature_id(tree_id, node_id);
+            example_debug_info.add_feature_ids(feature_id);
+            // Get logit after split.
+            node_id = resource->next_node(tree_id, node_id, i,
+                                          batch_bucketized_features);
+            tree_logit = resource->GetTreeWeight(tree_id) *
+                         resource->node_value(tree_id, node_id);
+            // Output logit incorporates sum of leaf logits from prior trees.
+            example_debug_info.add_logits_path(tree_logit + past_trees_logit);
           }
         }
         // Set output as serialized proto containing debug info.
