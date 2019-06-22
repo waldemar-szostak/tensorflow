@@ -131,6 +131,28 @@ class HloFftInstruction : public HloInstruction {
   std::vector<int64> fft_length_;
 };
 
+class HloCompareInstruction : public HloInstruction {
+ public:
+  explicit HloCompareInstruction(const Shape& shape, HloInstruction* lhs,
+                                 HloInstruction* rhs,
+                                 ComparisonDirection direction);
+  ComparisonDirection direction() const { return direction_; }
+  HloInstructionProto ToProto() const override;
+
+ private:
+  std::vector<string> ExtraAttributesToStringImpl(
+      const HloPrintOptions& options) const override;
+  bool IdenticalSlowPath(
+      const HloInstruction& other,
+      const std::function<bool(const HloComputation*, const HloComputation*)>&
+          eq_computations) const override;
+  std::unique_ptr<HloInstruction> CloneWithNewOperandsImpl(
+      const Shape& shape, absl::Span<HloInstruction* const> new_operands,
+      HloCloneContext* context) const override;
+
+  ComparisonDirection direction_;
+};
+
 class HloTriangularSolveInstruction : public HloInstruction {
  public:
   explicit HloTriangularSolveInstruction(const Shape& shape, HloInstruction* a,
@@ -157,6 +179,31 @@ class HloTriangularSolveInstruction : public HloInstruction {
       HloCloneContext* context) const override;
 
   TriangularSolveOptions triangular_solve_options_;
+};
+
+class HloCholeskyInstruction : public HloInstruction {
+ public:
+  explicit HloCholeskyInstruction(const Shape& shape, HloInstruction* a,
+                                  const CholeskyOptions& options);
+  const CholeskyOptions& cholesky_options() const { return cholesky_options_; }
+
+  // Returns a serialized representation of this instruction.
+  HloInstructionProto ToProto() const override;
+
+ private:
+  std::vector<string> ExtraAttributesToStringImpl(
+      const HloPrintOptions& options) const override;
+  bool IdenticalSlowPath(
+      const HloInstruction& other,
+      const std::function<bool(const HloComputation*, const HloComputation*)>&
+          eq_computations) const override;
+
+  // Implementation for non-common logic of CloneWithNewOperands.
+  std::unique_ptr<HloInstruction> CloneWithNewOperandsImpl(
+      const Shape& shape, absl::Span<HloInstruction* const> new_operands,
+      HloCloneContext* context) const override;
+
+  CholeskyOptions cholesky_options_;
 };
 
 class HloSendRecvInstruction : public HloInstruction {
@@ -268,12 +315,7 @@ class HloAllReduceInstruction : public HloCollectiveInstruction {
       const Shape& shape, absl::Span<HloInstruction* const> operands,
       HloComputation* reduce_computation,
       const std::vector<ReplicaGroup>& replica_groups,
-      absl::string_view barrier, const absl::optional<int64>& all_reduce_id);
-
-  // Returns the barrier config used for the AllReduce implementation of
-  // each backend.
-  string all_reduce_barrier() const { return all_reduce_barrier_; }
-  void set_all_reduce_barrier(string barrier) { all_reduce_barrier_ = barrier; }
+      const absl::optional<int64>& all_reduce_id);
 
   absl::optional<int64> all_reduce_id() const { return all_reduce_id_; }
   void set_all_reduce_id(const absl::optional<int64>& all_reduce_id);
@@ -297,9 +339,6 @@ class HloAllReduceInstruction : public HloCollectiveInstruction {
   std::unique_ptr<HloInstruction> CloneWithNewOperandsImpl(
       const Shape& shape, absl::Span<HloInstruction* const> new_operands,
       HloCloneContext* context) const override;
-
-  // The string representation of the barrier config used for AllReduce.
-  string all_reduce_barrier_;
 
   // For Allreduce nodes from different modules, if they have the same
   // all_reduce_id, they will be 'Allreduce'd. If empty, Allreduce will not be
@@ -447,7 +486,7 @@ class HloSortInstruction : public HloInstruction {
  public:
   explicit HloSortInstruction(const Shape& shape, int64 dimension,
                               absl::Span<HloInstruction* const> operands,
-                              HloComputation* compare);
+                              HloComputation* compare, bool is_stable);
   // Returns the dimension sizes or numbers associated with this instruction.
   const std::vector<int64>& dimensions() const override { return dimensions_; }
   int64 dimensions(int64 index) const override { return dimensions()[index]; }
@@ -460,6 +499,7 @@ class HloSortInstruction : public HloInstruction {
   HloInstruction* mutable_keys() { return mutable_operand(0); }
   // Returns the number of value operands.
   int64 values_count() const { return operand_count() - 1; }
+  bool is_stable() const { return is_stable_; }
 
  private:
   std::vector<string> ExtraAttributesToStringImpl(
@@ -474,6 +514,7 @@ class HloSortInstruction : public HloInstruction {
       HloCloneContext* context) const override;
 
   std::vector<int64> dimensions_;
+  bool is_stable_;
 };
 
 class HloTransposeInstruction : public HloInstruction {
@@ -601,6 +642,7 @@ class HloSliceInstruction : public HloInstruction {
 class HloConstantInstruction : public HloInstruction {
  public:
   explicit HloConstantInstruction(Literal literal);
+  explicit HloConstantInstruction(Literal literal, const Shape& shape);
   // Used when the literal is too large and dropped.
   explicit HloConstantInstruction(const Shape& shape);
   // Returns the literal associated with this instruction.
@@ -694,11 +736,11 @@ class HloFusionInstruction : public HloInstruction {
     return FuseInstructionInternal(instruction_to_fuse);
   }
 
-  // Fuses the given instruction in this fusion instruction and generate
+  // Fuses the given instruction in this fusion instruction and generates a
   // multioutput fusion instruction. A clone of the instruction_to_fuse will
   // be part of the output of fusion instructions. The users of
   // instruction_to_fuse will be redirected to this fusion instructions.
-  // instruction_to_fuse will be removed from its parent computation.
+  // instruction_to_fuse is unchanged otherwise.
   HloInstruction* FuseInstructionIntoMultiOutput(
       HloInstruction* instruction_to_fuse) {
     return FuseInstructionInternal(instruction_to_fuse, /* add_output */ true);
@@ -745,15 +787,12 @@ class HloFusionInstruction : public HloInstruction {
   Status DeduplicateFusionOperands();
 
  private:
-  // Fuses the given instruction into this fusion instruction. When add_output
-  // is false (which is the default), instruction_to_fuse is cloned and the
-  // clone is placed in the fusion instruction. instruction_to_fuse is
-  // unchanged.
-  //
-  // When add_output is true, a clone of the instruction_to_fuse will be part
-  // of the output of fusion instructions. The users of instruction_to_fuse
-  // will be redirected to this fusion instructions. instruction_to_fuse will
-  // be removed from its parent computation.
+  // Fuses the given instruction into this fusion instruction.
+  // instruction_to_fuse is cloned and the clone is placed in the fusion
+  // instruction.  The users of instruction_to_fuse will be redirected to this
+  // fusion instruction. instruction_to_fuse is unchanged otherwise. When
+  // add_output is true, a clone of the instruction_to_fuse will be added as
+  // additional output resulting in a multi-output fusion.
   HloInstruction* FuseInstructionInternal(HloInstruction* instruction_to_fuse,
                                           bool add_output = false);
   // Clones the given instruction_to_fuse and insert the clone into this fusion
@@ -815,10 +854,35 @@ class HloParameterInstruction : public HloInstruction {
   explicit HloParameterInstruction(int64 parameter_number, const Shape& shape,
                                    const string& name);
   int64 parameter_number() const { return parameter_number_; }
+
+  // Sets and gets the whether all replicas will receive the same parameter data
+  // for each leaf buffer in data parallelism.
+  void set_parameter_replicated_at_leaf_buffers(
+      absl::Span<const bool> parameter_replicated_at_leaf_buffers) {
+    CHECK_EQ(ShapeUtil::GetLeafCount(shape()),
+             parameter_replicated_at_leaf_buffers.size());
+    parameter_replicated_at_leaf_buffers_.emplace(
+        parameter_replicated_at_leaf_buffers.begin(),
+        parameter_replicated_at_leaf_buffers.end());
+  }
+  void set_parameter_replicated_at_leaf_buffers(
+      const std::vector<bool>& parameter_replicated_at_leaf_buffers) {
+    CHECK_EQ(ShapeUtil::GetLeafCount(shape()),
+             parameter_replicated_at_leaf_buffers.size());
+    parameter_replicated_at_leaf_buffers_ =
+        parameter_replicated_at_leaf_buffers;
+  }
+  const absl::optional<std::vector<bool>>&
+  parameter_replicated_at_leaf_buffers() const {
+    return parameter_replicated_at_leaf_buffers_;
+  }
+
   // Returns a serialized representation of this instruction.
   HloInstructionProto ToProto() const override;
 
  private:
+  std::vector<string> ExtraAttributesToStringImpl(
+      const HloPrintOptions& options) const override;
   bool IdenticalSlowPath(
       const HloInstruction& other,
       const std::function<bool(const HloComputation*, const HloComputation*)>&
@@ -832,6 +896,10 @@ class HloParameterInstruction : public HloInstruction {
       HloCloneContext* context) const override;
 
   int64 parameter_number_ = 0;
+
+  // Specifies whether each buffer has the same parameter value on all replicas
+  // in data parallelism.
+  absl::optional<std::vector<bool>> parameter_replicated_at_leaf_buffers_;
 };
 
 class HloGetTupleElementInstruction : public HloInstruction {
@@ -840,6 +908,10 @@ class HloGetTupleElementInstruction : public HloInstruction {
                                          HloInstruction* operand, int64 index);
   // Returns the tuple index associated with this instruction.
   int64 tuple_index() const { return tuple_index_; }
+  // Sets the tuple index associated with this instruction.
+  void set_tuple_index(int64 new_tuple_index) {
+    tuple_index_ = new_tuple_index;
+  }
   // Returns a serialized representation of this instruction.
   HloInstructionProto ToProto() const override;
 
@@ -1097,15 +1169,13 @@ class HloCustomCallInstruction : public HloInstruction {
  public:
   HloCustomCallInstruction(const Shape& shape,
                            absl::Span<HloInstruction* const> operands,
-                           absl::string_view custom_call_target,
-                           absl::string_view opaque);
+                           absl::string_view custom_call_target, string opaque);
 
   // Constructor for a custom call with constrained layout. 'shape' and
   // 'operands_with_layout' must all have layouts.
   HloCustomCallInstruction(const Shape& shape,
                            absl::Span<HloInstruction* const> operands,
-                           absl::string_view custom_call_target,
-                           absl::string_view opaque,
+                           absl::string_view custom_call_target, string opaque,
                            absl::Span<const Shape> operand_shapes_with_layout);
 
   const Window& window() const override {
@@ -1127,7 +1197,8 @@ class HloCustomCallInstruction : public HloInstruction {
     convolution_dimension_numbers_ =
         absl::make_unique<ConvolutionDimensionNumbers>(dnums);
   }
-  const string& opaque() const { return opaque_; }
+  // TODO(jpienaar): Remove this accessor in the follow up.
+  const string& opaque() const { return raw_backend_config_string(); }
   const string& custom_call_target() const { return custom_call_target_; }
   void set_feature_group_count(int64 feature_group_count) {
     feature_group_count_ = feature_group_count;
@@ -1135,8 +1206,16 @@ class HloCustomCallInstruction : public HloInstruction {
   void set_batch_group_count(int64 batch_group_count) {
     batch_group_count_ = batch_group_count;
   }
+  // Sets whether this custom call has a side-effect - by default a custom call
+  // has no side-effects.
+  void set_custom_call_has_side_effect(bool custom_call_has_side_effect) {
+    custom_call_has_side_effect_ = custom_call_has_side_effect;
+  }
   int64 feature_group_count() const { return feature_group_count_; }
   int64 batch_group_count() const { return batch_group_count_; }
+  bool custom_call_has_side_effect() const {
+    return custom_call_has_side_effect_;
+  }
   // Returns a serialized representation of this instruction.
   HloInstructionProto ToProto() const override;
 
@@ -1163,8 +1242,6 @@ class HloCustomCallInstruction : public HloInstruction {
       HloCloneContext* context) const override;
   // Name of a global symbol to call.
   string custom_call_target_;
-  // Opaque string interpreted by the backend.
-  string opaque_;
   // Describes the window in a windowed operation such as convolution.
   std::unique_ptr<Window> window_;
   // Describes the dimension numbers used for a convolution.
@@ -1177,6 +1254,8 @@ class HloCustomCallInstruction : public HloInstruction {
   // For layout-constrained custom calls, this vector holds the shape with
   // layout for each operand.
   std::vector<Shape> operand_shapes_with_layout_;
+  // Whether this custom call has a side-effect.
+  bool custom_call_has_side_effect_;
 };
 
 class HloPadInstruction : public HloInstruction {
@@ -1299,8 +1378,6 @@ class HloGatherInstruction : public HloInstruction {
   absl::Span<const int64> gather_slice_sizes() const {
     return gather_slice_sizes_;
   }
-  // Returns the dump string of the gather dimension numbers.
-  string GatherDimensionNumbersToString() const;
   // Returns a serialized representation of this instruction.
   HloInstructionProto ToProto() const override;
 
@@ -1309,6 +1386,9 @@ class HloGatherInstruction : public HloInstruction {
       absl::Span<const int64> offset_dims,
       absl::Span<const int64> collapsed_slice_dims,
       absl::Span<const int64> start_index_map, int64 index_vector_dim);
+  // Returns the dump string of the given gather dimension numbers.
+  static string GatherDimensionNumbersToString(
+      const GatherDimensionNumbers& gather_dimension_numbers);
 
  private:
   std::vector<string> ExtraAttributesToStringImpl(
@@ -1336,8 +1416,6 @@ class HloScatterInstruction : public HloInstruction {
     CHECK(scatter_dimension_numbers_ != nullptr);
     return *scatter_dimension_numbers_;
   }
-  // Returns the dump string of the scatter dimension numbers.
-  string ScatterDimensionNumbersToString() const;
   // Returns a serialized representation of this instruction.
   HloInstructionProto ToProto() const override;
 
@@ -1347,6 +1425,9 @@ class HloScatterInstruction : public HloInstruction {
       absl::Span<const int64> inserted_window_dims,
       absl::Span<const int64> scatter_dims_to_operand_dims,
       int64 index_vector_dim);
+  // Returns the dump string of the given scatter dimension numbers.
+  static string ScatterDimensionNumbersToString(
+      const ScatterDimensionNumbers& scatter_dimension_numbers);
 
  private:
   std::vector<string> ExtraAttributesToStringImpl(
@@ -1494,6 +1575,31 @@ class HloGetDimensionSizeInstruction : public HloInstruction {
       HloCloneContext* context) const override;
 
   int64 dimension_;
+};
+
+class HloRngGetAndUpdateStateInstruction : public HloInstruction {
+ public:
+  explicit HloRngGetAndUpdateStateInstruction(const Shape& shape, int64 delta);
+
+  // Returns the delta value.
+  int64 delta() const { return delta_; }
+  void set_delta(int64 delta) { delta_ = delta; }
+  // Returns a serialized representation of this instruction.
+  HloInstructionProto ToProto() const override;
+
+ private:
+  std::vector<string> ExtraAttributesToStringImpl(
+      const HloPrintOptions& options) const override;
+  bool IdenticalSlowPath(
+      const HloInstruction& other,
+      const std::function<bool(const HloComputation*, const HloComputation*)>&
+          eq_computations) const override;
+  // Implementation for non-common logic of CloneWithNewOperands.
+  std::unique_ptr<HloInstruction> CloneWithNewOperandsImpl(
+      const Shape& shape, absl::Span<HloInstruction* const> new_operands,
+      HloCloneContext* context) const override;
+
+  int64 delta_;
 };
 
 }  // namespace xla

@@ -29,6 +29,7 @@ import re
 
 import six
 
+from tensorflow.core.protobuf import graph_debug_info_pb2
 from tensorflow.python.util import tf_stack
 
 _NAME_REGEX = r"[A-Za-z0-9_.][A-Za-z0-9_.\-/]*?"
@@ -41,6 +42,8 @@ _ParseTag = collections.namedtuple("_ParseTag", ["type", "name"])
 _BAD_FILE_SUBSTRINGS = [
     os.path.join("tensorflow", "python"),
     os.path.join("tensorflow", "contrib"),
+    os.path.join("tensorflow_estimator", "python"),
+    os.path.join("tensorflow_estimator", "contrib"),
     "<embedded",
 ]
 
@@ -138,8 +141,8 @@ def _compute_colocation_summary_from_dict(name, colocation_dict, prefix=""):
   Returns:
     A multi-line string similar to:
         Node-device colocations active during op creation:
-          with tf.colocate_with(test_node_1): <test_1.py:27>
-          with tf.colocate_with(test_node_2): <test_2.py:38>
+          with tf.compat.v1.colocate_with(test_node_1): <test_1.py:27>
+          with tf.compat.v1.colocate_with(test_node_2): <test_2.py:38>
     The first line will have no padding to its left by default.  Subsequent
     lines will have two spaces of left-padding.  Use the prefix argument
     to increase indentation.
@@ -210,38 +213,76 @@ def _get_defining_frame_from_op(op):
   frame_index = _find_index_of_defining_frame_for_op(op)
   return op.traceback[frame_index]
 
-def compute_useful_stack(op):
-  """Return a list of line name and lineno pairs, which form a 'useful' stack.
+
+def _compute_useful_frames(op, num):
+  """Return a list of frames, which form a 'useful' stack.
 
   Starting from the defining frame to the outermost one, this method computes
-  the contiguous portion of the 'useful' stack trace and returns each line as
-  a line name and lineno pair.
+  the contiguous portion of the 'useful' stack trace and returns the selected
+  frames.
 
   Args:
     op: op.Operation object having a _traceback member.
+    num: total number of frames to return.
 
   Returns:
-    A list of line name and lineno pairs. Below is an example of returned list:
-    [("tool_utils.py", "124", "func1", "a={}"), ("tool_utils.py", "21", "func2",
-    "for i in range(10):"), ....]
+    A list of frames.
   """
   defining_frame_index = _find_index_of_defining_frame_for_op(op)
-  stack_trace = []
-  # The stack trace is collected from the defining (included) to the outermost.
-  # Include `frame_num` frames at most.
-  # Two lines from the TensorFlow library are included to show the node
-  # definition.
-  frame_num = 10
+  # The stack trace is collected from two lines before the defining frame in the
+  # model file to the outermost with `num` frames at most. These two extra lines
+  # are included from the TensorFlow library to give the context which node is
+  # defined.
   innermost_excluded = min(defining_frame_index + 2 + 1, len(op.traceback))
-  outermost_included = max(innermost_excluded - frame_num, 0)
-  for index in reversed(range(outermost_included, innermost_excluded)):
-    frame = op.traceback[index]
-    filename = frame[tf_stack.TB_FILENAME]
-    lineno = frame[tf_stack.TB_LINENO]
-    func = frame[tf_stack.TB_FUNCNAME]
-    code = frame[tf_stack.TB_CODEDICT]
-    stack_trace.append((filename, lineno, func, code))
-  return stack_trace
+  outermost_included = max(innermost_excluded - num, 0)
+  return op.traceback[outermost_included:innermost_excluded]
+
+
+def create_graph_debug_info_def(operations):
+  """Construct and returns a `GraphDebugInfo` protocol buffer.
+
+  Args:
+    operations: An iterable of op.Operation objects having _traceback members.
+
+  Returns:
+    GraphDebugInfo protocol buffer.
+
+  Raises:
+    TypeError: If the arguments are not of the correct proto buffer type.
+  """
+  # Creates an empty GraphDebugInfoDef proto.
+  graph_debug_info_def = graph_debug_info_pb2.GraphDebugInfo()
+
+  # Gets the file names and line numbers for the exported node names. Also
+  # collects the unique file names.
+  all_file_names = set()
+  node_to_trace = {}
+  for func, op in operations:
+    # Gets the stack trace of the operation and then the file location.
+    node_name = func + op.name
+    node_to_trace[node_name] = _compute_useful_frames(op, 10)
+    for frame in node_to_trace[node_name]:
+      all_file_names.add(frame[tf_stack.TB_FILENAME])
+
+  # Sets the `files` field in the GraphDebugInfo proto
+  graph_debug_info_def.files.extend(all_file_names)
+
+  # Builds a mapping between file names and index of the `files` field, so we
+  # only store the indexes for the nodes in the GraphDebugInfo.
+  file_to_index = dict(
+      [(y, x) for x, y in enumerate(graph_debug_info_def.files)])
+
+  # Creates the FileLineCol proto for each node and sets the value in the
+  # GraphDebugInfo proto. We only store the file name index for each node to
+  # save the storage space.
+  for node_name, frames in node_to_trace.items():
+    trace_def = graph_debug_info_def.traces[node_name]
+    for frame in reversed(frames):
+      trace_def.file_line_cols.add(
+          file_index=file_to_index[frame[tf_stack.TB_FILENAME]],
+          line=frame[tf_stack.TB_LINENO])
+
+  return graph_debug_info_def
 
 
 def compute_field_dict(op, strip_file_prefix=""):
@@ -261,16 +302,16 @@ def compute_field_dict(op, strip_file_prefix=""):
       "defined_at": " (defined at tool_utils.py:124)",
       "colocations":
           '''Node-device colocations active during op creation:
-               with tf.colocate_with(test_node_1): <test_1.py:27>
-               with tf.colocate_with(test_node_2): <test_2.py:38>'''
+               with tf.compat.v1.colocate_with(test_node_1): <test_1.py:27>
+               with tf.compat.v1.colocate_with(test_node_2): <test_2.py:38>'''
       "devices":
           '''Device assignments active during op 'foo' creation:
                with tf.device(/cpu:0): <test_1.py:27>
                with tf.device(some_func<foo.py, 123>): <test_2.py:38>'''
       "devs_and_colocs": A concatenation of colocations and devices, e.g.
           '''Node-device colocations active during op creation:
-               with tf.colocate_with(test_node_1): <test_1.py:27>
-               with tf.colocate_with(test_node_2): <test_2.py:38>'''
+               with tf.compat.v1.colocate_with(test_node_1): <test_1.py:27>
+               with tf.compat.v1.colocate_with(test_node_2): <test_2.py:38>'''
              Device assignments active during op 'foo' creation:
                with tf.device(/cpu:0): <test_1.py:27>
                with tf.device(some_func<foo.py, 123>): <test_2.py:38>'''
@@ -321,21 +362,18 @@ def traceback_files_common_prefix(all_ops):
   return os.path.split(os.path.commonprefix(list(files)))[0]
 
 
-def _sources_for_node(name, graph):
-  """Gets the top-level root input nodes for 'name' node.
-
-  We recursively traverse the graph from 'name' node to its inputs and collect
-  all the nodes which don't have any inputs.
+def _sources_for_node(node, graph):
+  """Gets the input op nodes for 'node'.
 
   Args:
-    name: The name of the node.
+    node: The node.
     graph: The graph containing the node.
 
   Returns:
-    The unique top-level root input nodes.
+    The unique input nodes.
   """
-  def _helper(name, graph, seen_names, inputs):
-    """Recursive helper. 'seen_names' and 'inputs' are mutated."""
+  inputs = set()
+  for name in node.node_def.input:
     if name.startswith("^"):
       name = name[1:]
     try:
@@ -345,20 +383,9 @@ def _sources_for_node(name, graph):
       try:
         op = graph.get_operation_by_name(name)
       except KeyError:
-        return
-    name = op.name
-    if name in seen_names:
-      return
-    seen_names.add(name)
-    if not op.node_def.input:
-      inputs.add(op)
-      return
-    for n in op.node_def.input:
-      _helper(n, graph, seen_names, inputs)
+        continue
+    inputs.add(op)
 
-  names = set()
-  inputs = set()
-  _helper(name, graph, names, inputs)
   return list(inputs)
 
 
@@ -422,7 +449,7 @@ def interpolate(error_message, graph):
     if op is None:
       tagged_ops.append(None)
     else:
-      tagged_ops.append([op] + _sources_for_node(op.name, graph))
+      tagged_ops.append([op] + _sources_for_node(op, graph))
 
   common_prefix = traceback_files_common_prefix(tagged_ops)
   for tag, ops in zip(tags, tagged_ops):

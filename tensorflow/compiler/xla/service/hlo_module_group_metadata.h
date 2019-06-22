@@ -24,10 +24,10 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/optional.h"
+#include "tensorflow/compiler/xla/service/hlo_alias_analysis.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
-#include "tensorflow/compiler/xla/service/tuple_points_to_analysis.h"
 #include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -67,8 +67,7 @@ class HloModuleGroupMetadata {
     kInvalid,
     kWhileCondition,
     kWhileBody,
-    kConditionalTrue,
-    kConditionalFalse,
+    kConditionalBranch,
     kCallFunction,
   };
 
@@ -80,12 +79,13 @@ class HloModuleGroupMetadata {
   class TrackedInstruction {
    public:
     TrackedInstruction() = default;
-    TrackedInstruction(HloInstruction* instruction, ComputationKind kind)
-        : instruction_(instruction), kind_(kind) {}
+    TrackedInstruction(HloInstruction* instruction, ComputationKind kind,
+                       int index = -1)
+        : instruction_(instruction), kind_(kind), index_(index) {}
 
     bool operator==(const TrackedInstruction& rhs) const {
       return instruction_->opcode() == rhs.instruction_->opcode() &&
-             kind_ == rhs.kind_;
+             kind_ == rhs.kind_ && index_ == rhs.index_;
     }
     bool operator!=(const TrackedInstruction& rhs) const {
       return !operator==(rhs);
@@ -98,6 +98,7 @@ class HloModuleGroupMetadata {
    private:
     HloInstruction* instruction_ = nullptr;
     ComputationKind kind_ = ComputationKind::kInvalid;
+    int index_ = -1;
   };
 
   // Represents a channel and the instructions that form the channel.
@@ -194,7 +195,8 @@ class HloModuleGroupMetadata {
     return companion_set_index_.at(instruction);
   }
 
-  // Returns the list of all companion sets in the HLO module group.
+  // Returns the list of all companion sets in the HLO module group. Each
+  // returned set contains at least one HloInstruction.
   const std::vector<std::unique_ptr<std::vector<HloInstruction*>>>&
   companion_sets() const {
     return companion_sets_;
@@ -206,8 +208,8 @@ class HloModuleGroupMetadata {
   // Returns the maximum channel id or all_reduce_id used in the module group.
   int64 max_channel_id() const { return max_channel_id_; }
 
-  TuplePointsToAnalysis* points_to_analysis(HloModule* module) const {
-    return points_to_analyses_.at(module).get();
+  HloAliasAnalysis* alias_analysis(HloModule* module) const {
+    return alias_analyses_.at(module).get();
   }
 
  private:
@@ -281,8 +283,8 @@ class HloModuleGroupMetadata {
   // The modules that this metadata was built from.
   const std::vector<HloModule*> modules_;
 
-  absl::flat_hash_map<HloModule*, std::unique_ptr<TuplePointsToAnalysis>>
-      points_to_analyses_;
+  absl::flat_hash_map<HloModule*, std::unique_ptr<HloAliasAnalysis>>
+      alias_analyses_;
 };
 
 }  // namespace xla

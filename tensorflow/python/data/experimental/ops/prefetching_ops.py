@@ -19,6 +19,7 @@ from __future__ import print_function
 
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.ops import iterator_ops
+from tensorflow.python.data.util import structure
 from tensorflow.python.eager import function
 from tensorflow.python.framework import device as framework_device
 from tensorflow.python.framework import dtypes
@@ -70,8 +71,8 @@ def copy_to_device(target_device, source_device="/cpu:0"):
 
   def _apply_fn(dataset):
     options = dataset_ops.Options()
-    options.experimental_autotune = False
     options.experimental_optimization.apply_default_optimizations = False
+    options.experimental_optimization.autotune = False
     return _CopyToDeviceDataset(
         dataset, target_device=target_device,
         source_device=source_device).with_options(options)
@@ -141,9 +142,12 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
       """
       with ops.device(self._source_device_string):
         iterator = iterator_ops.Iterator.from_string_handle(
-            string_handle, self.output_types, self.output_shapes,
-            self.output_classes)
-      return self._element_structure._to_tensor_list(iterator.get_next())  # pylint: disable=protected-access
+            string_handle,
+            dataset_ops.get_legacy_output_types(self),
+            dataset_ops.get_legacy_output_shapes(self),
+            dataset_ops.get_legacy_output_classes(self))
+      return structure.to_tensor_list(self._element_structure,
+                                      iterator.get_next())
 
     next_func_concrete = _next_func._get_concrete_function_internal()  # pylint: disable=protected-access
 
@@ -153,9 +157,9 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
     def _remote_next_func(string_handle):
       return functional_ops.remote_call(
           target=self._source_device,
-          args=[string_handle] +
-          next_func_concrete.captured_inputs,
-          Tout=self._input_dataset._element_structure._flat_types,  # pylint: disable=protected-access
+          args=[string_handle] + next_func_concrete.captured_inputs,
+          Tout=structure.get_flat_tensor_types(
+              self._input_dataset._element_structure),  # pylint: disable=protected-access
           f=next_func_concrete)
 
     self._next_func = _remote_next_func._get_concrete_function_internal()  # pylint: disable=protected-access

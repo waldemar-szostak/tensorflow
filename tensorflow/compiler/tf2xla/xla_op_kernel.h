@@ -81,6 +81,11 @@ class XlaOpKernelContext {
   // xla::PRIMITIVE_TYPE_INVALID.
   xla::PrimitiveType input_xla_type(int index);
 
+  // Returns the type of input `name` as an xla::PrimitiveType. If the type
+  // is not representable as an XLA type, sets an error status and returns
+  // xla::PRIMITIVE_TYPE_INVALID.
+  xla::PrimitiveType InputXlaType(absl::string_view name);
+
   // Returns the shape of input `index`.
   TensorShape InputShape(int index);
 
@@ -137,6 +142,10 @@ class XlaOpKernelContext {
 
   // Converts a constant 1D int32 or int64 tensor into a TensorShape.
   Status ConstantInputAsShape(int index, TensorShape* shape);
+
+  // Converts a constant 1D int32 or int64 tensor, or a scalar with value -1
+  // into a PartialTensorShape.
+  Status ConstantInputAsPartialShape(int index, PartialTensorShape* shape);
 
   // Returns the named list-valued immutable input in "list", as
   // defined in the OpDef.  If the named output is not list-valued,

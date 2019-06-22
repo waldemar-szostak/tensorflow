@@ -2,19 +2,16 @@
 # Contains ops for factorization of data, including matrix factorization and
 # clustering.
 
-licenses(["notice"])  # Apache 2.0
-
-exports_files(["LICENSE"])
-
-package(default_visibility = ["//tensorflow:__subpackages__"])
-
-load("//tensorflow:tensorflow.bzl", "py_test")
-load("//tensorflow:tensorflow.bzl", "tf_custom_op_library")
-load("//tensorflow:tensorflow.bzl", "tf_gen_op_wrapper_py")
-load("//tensorflow:tensorflow.bzl", "tf_gen_op_libs")
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
+load("//tensorflow:tensorflow.bzl", "py_test", "tf_custom_op_library", "tf_gen_op_libs", "tf_gen_op_wrapper_py", "tf_py_test")
 load("//tensorflow:tensorflow.bzl", "cuda_py_test")
 load("//tensorflow:tensorflow.bzl", "tf_custom_op_py_library")
+
+package(
+    default_visibility = ["//tensorflow:__subpackages__"],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+exports_files(["LICENSE"])
 
 tf_custom_op_py_library(
     name = "factorization_py",
@@ -201,12 +198,10 @@ py_test(
     name = "kmeans_test",
     size = "medium",
     srcs = ["python/ops/kmeans_test.py"],
+    python_version = "PY2",
     shard_count = 4,
     srcs_version = "PY2AND3",
-    tags = [
-        "nomac",  # b/73741358
-        "notsan",  # b/67512932
-    ],
+    tags = ["notsan"],
     deps = [
         ":factorization_py",
         ":factorization_py_CYCLIC_DEPENDENCIES_THAT_NEED_TO_GO",
