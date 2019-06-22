@@ -44,6 +44,9 @@ toolchain {
       action: "c++-compile"
       flag_group {
         flag: "-std=c++11"
+        flag: "-D_MWAITXINTRIN_H_INCLUDED"
+        flag: "-D_FORCE_INLINES"
+	flag: "-D__STRICT_ANSI__"
       }
     }
   }
